@@ -602,6 +602,19 @@ def telegram_bot_listener_loop():
                         room_url = f"{srv_url}/?room={room_id}"
                         send_telegram_direct(chat_id, f"🟢 <b>MEETLINK VIDEO ROOM CREATED!</b>\n━━━━━━━━━━━━━━━━━━\n🆔 Room ID: <code>{room_id}</code>\n⏱️ TTL: 1 Hour (Auto-expires)\n━━━━━━━━━━━━━━━━━━\n🔗 <b>Link:</b> {room_url}\n\n👉 Share this link with anyone to start an instant peer-to-peer HD video call without login!")
                         continue
+
+                    elif text.startswith("/queue"):
+                        status = get_queue_status()
+                        queue_msg = (
+                            f"📋 <b>MEETLINK QUEUE STATUS</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━\n"
+                            f"📦 Files in Queue: <b>{status['queue_length']}</b>\n"
+                            f"🔄 Currently Processing: <code>{status['current'] or 'None'}</code>\n"
+                            f"✅ Total Processed: <b>{status['processed']}</b>\n"
+                            f"🕐 Last Updated: {datetime.now().strftime('%H:%M:%S')}"
+                        )
+                        send_telegram_direct(chat_id, queue_msg)
+                        continue
                     
                     # 2. Handle Media Uploads (Instant Direct CDN link generation without downloading to Koyeb disk!)
                     media = msg.get("document") or msg.get("video") or msg.get("audio") or msg.get("voice")
@@ -962,7 +975,7 @@ def _bg_process_recording_with_progress(webm_path, room_id, seg_num, is_last, ti
             f"📦 Size: {fmt_size(webm_size)}\n"
             f"🎬 Segment: {seg_num}\n"
             f"👤 {perspective}\n"
-            f"📊 Status: <b>Queued → Processing</b>"
+            f"📊 Status: <b>1/5 - Pre-repair Started</b>"
         )
 
         # ---- If the browser already sent a playable MP4 (Safari/iOS), skip conversion ----
@@ -991,7 +1004,7 @@ def _bg_process_recording_with_progress(webm_path, room_id, seg_num, is_last, ti
                 f"🆔 Room: <code>{room_id}</code>\n"
                 f"📦 Size: {fmt_size(mp4_size)}\n"
                 f"🎬 Segment: {seg_num}\n"
-                f"⏳ Status: Uploading MP4..."
+                f"📊 Status: <b>4/5 - Uploading MP4...</b>"
             )
             
             video_caption = (
