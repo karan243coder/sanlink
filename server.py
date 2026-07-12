@@ -88,40 +88,55 @@ def send_queue_status_to_channel():
     send_telegram_message(msg)
 
 
-# ============ ADVANCED QUEUE WORKER ============
+# ============ ADVANCED QUEUE WORKER (FIXED & ROBUST) ============
 def process_recording_queue():
     global current_processing, processed_count
+    
+    print("🚀 [Queue Worker] Started successfully!")
     
     while True:
         try:
             with queue_lock:
                 if not recording_queue:
-                    time.sleep(2)
+                    time.sleep(1.5)
                     continue
                 
                 job = recording_queue.pop(0)
                 current_processing = job.get("filename", "unknown")
+                print(f"🔄 [Queue Worker] Processing: {current_processing}")
             
-            # Send queue status
-            send_queue_status_to_channel()
+            # Send queue status to channel
+            try:
+                send_queue_status_to_channel()
+            except Exception as e:
+                print(f"⚠️ Queue status send error: {e}")
             
             # Process the recording
-            _bg_process_recording_with_progress(**job)
+            try:
+                _bg_process_recording_with_progress(**job)
+                print(f"✅ [Queue Worker] Finished: {current_processing}")
+            except Exception as proc_error:
+                print(f"❌ Processing error for {current_processing}: {proc_error}")
             
             with queue_lock:
                 processed_count += 1
                 current_processing = None
             
             # Send updated status
-            send_queue_status_to_channel()
+            try:
+                send_queue_status_to_channel()
+            except Exception as e:
+                print(f"⚠️ Queue status update error: {e}")
             
         except Exception as e:
-            print(f"❌ Queue worker error: {e}")
-            time.sleep(5)
+            print(f"❌ Queue worker critical error: {e}")
+            time.sleep(3)
 
 
 # Start the queue worker
+print("🚀 [Queue System] Starting advanced queue worker...")
 threading.Thread(target=process_recording_queue, daemon=True).start()
+print("✅ [Queue System] Queue worker is now running in background!")
 
 active_rooms = {}
 
@@ -968,6 +983,8 @@ def send_telegram_file_smart(file_path, caption, is_video=False):
 def _bg_process_recording_with_progress(webm_path, room_id, seg_num, is_last, timestamp, webm_size, part_label):
     """Advanced background worker with progress updates."""
     try:
+        print(f"🎬 [Processing] Started for: {os.path.basename(webm_path)}")
+        
         filename_lower = os.path.basename(webm_path).lower()
         perspective = "Sender View"
         if "joiner" in filename_lower:
