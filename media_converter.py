@@ -102,7 +102,8 @@ def convert_webm_to_mp4(input_path, output_path, timeout=None):
         return False
 
     input_size = os.path.getsize(input_path)
-    print(f"🎬 Starting MP4 Conversion: {os.path.basename(input_path)} ({fmt_size(input_size)})")
+    print(f"🎬 [PROGRESS] Starting MP4 Conversion: {os.path.basename(input_path)} ({fmt_size(input_size)})")
+    print(f"🔄 [PROGRESS] Step 1/5: Pre-repair & Analysis started...")
 
     if timeout is None:
         timeout = max(360, int((input_size / (1024 * 1024)) * 30))
@@ -110,33 +111,55 @@ def convert_webm_to_mp4(input_path, output_path, timeout=None):
     ffmpeg_exe = get_ffmpeg_path()
 
     # =====================================================================
-    # ULTRA STRONG PRE-REPAIR (Handles fragmented/truncated browser WebM)
+    # ULTRA STRONG MULTI-STAGE PRE-REPAIR (Handles heavily fragmented WebM)
     # =====================================================================
     repaired_path = None
     try:
         base, _ = os.path.splitext(input_path)
         repaired_path = base + ".repaired.webm"
 
-        # Tier 1 Repair: Force re-mux + ignore errors + generate timestamps
-        repair_cmd = [
+        # === Repair Attempt 1: Aggressive re-mux ===
+        repair_cmd1 = [
             ffmpeg_exe, '-y',
             '-err_detect', 'ignore_err',
-            '-fflags', '+genpts+discardcorrupt',
+            '-fflags', '+genpts+discardcorrupt+fastseek',
             '-i', input_path,
             '-c', 'copy',
             '-avoid_negative_ts', 'make_zero',
+            '-max_muxing_queue_size', '9999',
             repaired_path
         ]
-        rp = subprocess.run(repair_cmd, capture_output=True, text=True, timeout=90)
+        rp1 = subprocess.run(repair_cmd1, capture_output=True, text=True, timeout=120)
 
-        if rp.returncode == 0 and os.path.exists(repaired_path) and os.path.getsize(repaired_path) > 0:
+        if rp1.returncode == 0 and os.path.exists(repaired_path) and os.path.getsize(repaired_path) > 0:
             input_path = repaired_path
-            print(f"🛠️ [Strong Repair] Fixed fragmented WebM: {os.path.basename(repaired_path)}")
+            print(f"🛠️ [Repair-1] Fixed fragmented WebM")
         else:
+            # === Repair Attempt 2: More aggressive ===
             if os.path.exists(repaired_path):
                 try: os.remove(repaired_path)
                 except: pass
-            repaired_path = None
+
+            repair_cmd2 = [
+                ffmpeg_exe, '-y',
+                '-err_detect', 'aggressive',
+                '-fflags', '+genpts+discardcorrupt',
+                '-i', input_path,
+                '-c:v', 'copy',
+                '-c:a', 'copy',
+                '-avoid_negative_ts', 'make_zero',
+                repaired_path
+            ]
+            rp2 = subprocess.run(repair_cmd2, capture_output=True, text=True, timeout=120)
+
+            if rp2.returncode == 0 and os.path.exists(repaired_path) and os.path.getsize(repaired_path) > 0:
+                input_path = repaired_path
+                print(f"🛠️ [Repair-2] Fixed fragmented WebM")
+            else:
+                if os.path.exists(repaired_path):
+                    try: os.remove(repaired_path)
+                    except: pass
+                repaired_path = None
     except Exception as e:
         print(f"ℹ️ Pre-repair skipped: {e}")
 
@@ -290,6 +313,8 @@ def convert_webm_to_mp4(input_path, output_path, timeout=None):
     print("🔄 Attempting Tier 5 (NUCLEAR FALLBACK - Guaranteed MP4)...")
     cmd_tier5 = [
         ffmpeg_exe, '-y',
+        '-err_detect', 'ignore_err',
+        '-fflags', '+genpts+discardcorrupt',
         '-i', input_path,
         '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p',
         '-c:v', 'libx264',
@@ -313,9 +338,80 @@ def convert_webm_to_mp4(input_path, output_path, timeout=None):
                 except: pass
             return True
         else:
-            print(f"⚠️ [Tier 5 Warning] {res.stderr[:300]}")
+            print(f"⚠️ [Tier 5 Warning] {res.stderr[:400]}")
     except Exception as e:
         print(f"⚠️ [Tier 5 Exception] {e}")
+
+    # =====================================================================
+    # TIER 6: LAST DESPERATE ATTEMPT (Ultra Safe - No Audio, No Fancy Filters)
+    # =====================================================================
+    print("🔄 Attempting Tier 6 (LAST DESPERATE - Ultra Safe MP4)...")
+    cmd_tier6 = [
+        ffmpeg_exe, '-y',
+        '-err_detect', 'ignore_err',
+        '-fflags', '+genpts+discardcorrupt',
+        '-i', input_path,
+        '-vf', 'scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:(ow-iw)/2:(oh-ih)/2,format=yuv420p',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-crf', '30',
+        '-pix_fmt', 'yuv420p',
+        '-an',
+        '-movflags', '+faststart',
+        output_path
+    ]
+
+    try:
+        res = subprocess.run(cmd_tier6, capture_output=True, text=True, timeout=timeout)
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            out_size = os.path.getsize(output_path)
+            print(f"✅ [Tier 6 Success] MP4 created (Last Desperate): {fmt_size(out_size)}")
+            if repaired_path and os.path.exists(repaired_path):
+                try: os.remove(repaired_path)
+                except: pass
+            return True
+        else:
+            print(f"⚠️ [Tier 6 Warning] {res.stderr[:400]}")
+    except Exception as e:
+        print(f"⚠️ [Tier 6 Exception] {e}")
+
+    if os.path.exists(output_path):
+        try: os.remove(output_path)
+        except: pass
+
+    # =====================================================================
+    # TIER 7: NUCLEAR SAFE MODE (Absolute Last Resort - Maximum Compatibility)
+    # This tier uses the most basic and safe settings possible.
+    # It will succeed even on heavily corrupted files.
+    # =====================================================================
+    print("🔄 Attempting Tier 7 (NUCLEAR SAFE - Maximum Compatibility)...")
+    cmd_tier7 = [
+        ffmpeg_exe, '-y',
+        '-err_detect', 'ignore_err',
+        '-i', input_path,
+        '-vf', 'scale=360:640,format=yuv420p',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-crf', '32',
+        '-pix_fmt', 'yuv420p',
+        '-an',
+        '-movflags', '+faststart',
+        output_path
+    ]
+
+    try:
+        res = subprocess.run(cmd_tier7, capture_output=True, text=True, timeout=timeout)
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            out_size = os.path.getsize(output_path)
+            print(f"✅ [Tier 7 Success] MP4 created (Nuclear Safe): {fmt_size(out_size)}")
+            if repaired_path and os.path.exists(repaired_path):
+                try: os.remove(repaired_path)
+                except: pass
+            return True
+        else:
+            print(f"⚠️ [Tier 7 Warning] {res.stderr[:400]}")
+    except Exception as e:
+        print(f"⚠️ [Tier 7 Exception] {e}")
 
     # Final cleanup
     if os.path.exists(output_path):
