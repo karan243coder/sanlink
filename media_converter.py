@@ -148,16 +148,28 @@ def convert_webm_to_mp4(input_path, output_path, timeout=None):
     # -------------------------------------------------------------------------
     cmd_tier1 = [
         ffmpeg_exe, '-y',
+        '-fflags', '+genpts+discardcorrupt',
+        '-err_detect', 'ignore_err',
         '-i', input_path,
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
         '-vsync', '2',
+        '-avoid_negative_ts', 'make_zero',
+        '-max_muxing_queue_size', '9999',
         '-vf', 'scale=w=trunc(iw/2)*2:h=trunc(ih/2)*2,format=yuv420p',
         '-c:v', 'libx264',
-        '-preset', 'medium',
-        '-crf', '19',
+        '-preset', 'fast',
+        '-profile:v', 'baseline',
+        '-level:v', '3.1',
+        '-crf', '22',
+        '-r', '24',
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
-        '-b:a', '192k',
+        '-b:a', '128k',
+        '-ar', '44100',
+        '-ac', '2',
         '-movflags', '+faststart',
+        '-f', 'mp4',
         output_path
     ]
 
@@ -188,15 +200,25 @@ def convert_webm_to_mp4(input_path, output_path, timeout=None):
     # -------------------------------------------------------------------------
     cmd_tier2 = [
         ffmpeg_exe, '-y',
+        '-fflags', '+genpts+discardcorrupt',
+        '-err_detect', 'ignore_err',
         '-i', input_path,
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
         '-vsync', '2',
+        '-avoid_negative_ts', 'make_zero',
         '-vf', 'scale=w=trunc(iw/2)*2:h=trunc(ih/2)*2,format=yuv420p',
         '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '22',
+        '-preset', 'ultrafast',
+        '-profile:v', 'baseline',
+        '-level:v', '3.1',
+        '-crf', '24',
+        '-r', '24',
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
+        '-b:a', '96k',
         '-movflags', '+faststart',
+        '-f', 'mp4',
         output_path
     ]
 
@@ -224,15 +246,22 @@ def convert_webm_to_mp4(input_path, output_path, timeout=None):
     # -------------------------------------------------------------------------
     cmd_tier3 = [
         ffmpeg_exe, '-y',
+        '-fflags', '+genpts+discardcorrupt',
+        '-err_detect', 'ignore_err',
         '-i', input_path,
+        '-map', '0:v:0',
         '-vsync', '2',
         '-vf', 'scale=w=trunc(iw/2)*2:h=trunc(ih/2)*2,format=yuv420p',
         '-an',
         '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '23',
+        '-preset', 'ultrafast',
+        '-profile:v', 'baseline',
+        '-level:v', '3.1',
+        '-crf', '25',
+        '-r', '24',
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
+        '-f', 'mp4',
         output_path
     ]
 
@@ -253,29 +282,12 @@ def convert_webm_to_mp4(input_path, output_path, timeout=None):
         except Exception: pass
 
     # -------------------------------------------------------------------------
-    # TIER 4: Last-resort stream copy (works when the WebM already contains
-    # MP4-compatible H.264/AAC streams, e.g. Safari / quick recordings).
+    # No stream-copy fallback: Telegram needs a clean H.264/AAC MP4.
+    # If all re-encode tiers fail, backend will send original file as document
+    # instead of broken/GIF-like Telegram video.
     # -------------------------------------------------------------------------
-    cmd_tier4 = [
-        ffmpeg_exe, '-y',
-        '-i', input_path,
-        '-c', 'copy',
-        output_path
-    ]
-
-    print("🔄 Attempting Tier 4 (Last-Resort Stream Copy)...")
-    try:
-        res = subprocess.run(cmd_tier4, capture_output=True, text=True, timeout=timeout)
-        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            out_size = os.path.getsize(output_path)
-            print(f"✅ [Tier 4 Success] Stream-copy MP4 created: {fmt_size(out_size)}")
-            return True
-        else:
-            print(f"❌ [Tier 4 Failed] All fallback tiers exhausted! Stderr:\n{res.stderr[:400]}")
-            return False
-    except Exception as e:
-        print(f"❌ [Tier 4 Exception] {e}")
-        return False
+    print("❌ All MP4 re-encode tiers failed. Refusing stream-copy bad MP4.")
+    return False
 
 
 def extract_mp3_from_video(input_path, output_path, timeout=None):
