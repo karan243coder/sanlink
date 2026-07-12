@@ -591,7 +591,7 @@ def telegram_bot_listener_loop():
                     chat_id = msg["chat"]["id"]
                     text = (msg.get("text") or msg.get("caption") or "").strip()
                     
-                    # 1. Handle commands (Priority order)
+                    # 1. Handle commands (Clean Priority Order)
                     if text.startswith("/queue"):
                         status = get_queue_status()
                         queue_msg = (
@@ -602,16 +602,14 @@ def telegram_bot_listener_loop():
                             f"✅ Total Processed: <b>{status['processed']}</b>\n"
                             f"🕐 Last Updated: {datetime.now().strftime('%H:%M:%S')}"
                         )
-                        try:
-                            send_telegram_direct(chat_id, queue_msg)
-                            send_telegram_message(queue_msg)
-                        except:
-                            pass
+                        send_telegram_direct(chat_id, queue_msg)
+                        send_telegram_message(queue_msg)
                         continue
 
                     if text.startswith("/start"):
                         send_telegram_direct(chat_id, "🚀 <b>Welcome to MeetLink Cloud Bot!</b>\n━━━━━━━━━━━━━━━━━━\n📁 <b>Direct Media Upload:</b> Just send or attach ANY photo, video, audio, or document directly! I will generate an instant high-speed link with 1-Hour TTL.\n🔒 <b>Password Protection:</b> Add caption <code>/pwd 1234</code> when sending media.\n🔥 <b>View Once Mode:</b> Add caption <code>/vo</code> when sending media.\n📹 <b>Create Video Room:</b> Send <code>/room</code> to generate an instant peer-to-peer WebRTC video room!")
                         continue
+
                     elif text.startswith("/room") or text.startswith("/create") or text.startswith("/call"):
                         room_id = generate_unique_id(7)
                         active_rooms[room_id] = {"created_at": time.time(), "expires_at": time.time() + 3600, "call_start": None, "messages": [], "files_sent": [], "participants": 0}
@@ -619,34 +617,6 @@ def telegram_bot_listener_loop():
                         room_url = f"{srv_url}/?room={room_id}"
                         send_telegram_direct(chat_id, f"🟢 <b>MEETLINK VIDEO ROOM CREATED!</b>\n━━━━━━━━━━━━━━━━━━\n🆔 Room ID: <code>{room_id}</code>\n⏱️ TTL: 1 Hour (Auto-expires)\n━━━━━━━━━━━━━━━━━━\n🔗 <b>Link:</b> {room_url}\n\n👉 Share this link with anyone to start an instant peer-to-peer HD video call without login!")
                         continue
-                        status = get_queue_status()
-                        queue_msg = (
-                            f"📋 <b>MEETLINK QUEUE STATUS</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"📦 Files in Queue: <b>{status['queue_length']}</b>\n"
-                            f"🔄 Currently Processing: <code>{status['current'] or 'None'}</code>\n"
-                            f"✅ Total Processed: <b>{status['processed']}</b>\n"
-                            f"🕐 Last Updated: {datetime.now().strftime('%H:%M:%S')}"
-                        )
-                        
-                        # Send to user
-                        try:
-                            send_telegram_direct(chat_id, queue_msg)
-                        except:
-                            pass
-                        
-                        # Send to channel
-                        try:
-                            send_telegram_message(queue_msg)
-                        except:
-                            pass
-                        
-                        continue
-
-                    # Fallback for testing
-                    if text.lower() == "queue":
-                        status = get_queue_status()
-                        send_telegram_direct(chat_id, f"Queue Length: {status['queue_length']}")
                     
                     # 2. Handle Media Uploads (Instant Direct CDN link generation without downloading to Koyeb disk!)
                     media = msg.get("document") or msg.get("video") or msg.get("audio") or msg.get("voice")
