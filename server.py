@@ -925,29 +925,41 @@ def telegram_edit_progress(msg_id, room_id, seg_num, perspective, stage, percent
 
 # ============ VIDEO RECORDING UPLOAD (ASYNCHRONOUS ZERO-LAG) ============
 def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_size, part_label, progress_msg_id=None):
-    """Background worker for WebM -> MP4/MP3 conversion and Telegram uploading."""
+    """Background worker for WebM/MP4 -> playable Telegram MP4 + MP3 upload."""
     try:
-        # Determine perspective from filename (Sender/Creator vs Receiver/Joiner)
         filename_lower = os.path.basename(webm_path).lower()
         perspective = "Sender View"
         if "joiner" in filename_lower:
             perspective = "Receiver View"
-        telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Downloaded on server ✅', 20)
+        try:
+            telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Downloaded on server ✅', 20)
+        except Exception:
+            pass
 
-        # ---- Always force-reencode into Telegram-safe MP4 (H.264 baseline + AAC + faststart) ----
-        # Never trust browser MediaRecorder MP4/WebM directly; Telegram may show it as GIF or fail playback.
-        _base, _ext = os.path.splitext(webm_path)
-        mp4_path = _base + '.telegram.mp4'
-        telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Converting to MP4...', 35)
-        mp4_success = convert_webm_to_mp4(webm_path, mp4_path)
-        telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'MP4 conversion complete ✅' if mp4_success else 'MP4 conversion failed ⚠️', 60)
+        # Previous working behavior: if browser sends MP4, trust it and send directly.
+        # If browser sends WebM, convert to MP4.
+        is_already_mp4 = webm_path.lower().endswith('.mp4')
+        if is_already_mp4:
+            mp4_path = webm_path
+            mp4_success = True
+            print(f"🎬 Input already MP4 — skipping conversion: {os.path.basename(webm_path)}")
+        else:
+            mp4_path = webm_path.replace('.webm', '.mp4')
+            try:
+                telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Converting WebM to MP4...', 35)
+            except Exception:
+                pass
+            mp4_success = convert_webm_to_mp4(webm_path, mp4_path)
 
-        # ---- Extract MP3 from video ----
+        try:
+            telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'MP4 ready ✅' if mp4_success else 'MP4 conversion failed ❌', 65)
+        except Exception:
+            pass
+
         _base, _ = os.path.splitext(webm_path)
         mp3_path = _base + '.mp3'
         mp3_success = extract_mp3_from_video(webm_path, mp3_path)
 
-        # ---- Send MP4 video to Telegram ----
         if mp4_success:
             mp4_size = os.path.getsize(mp4_path)
             video_caption = (
@@ -959,16 +971,30 @@ def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_
                 f"🎬 Segment: {seg_num}\n"
                 f"🕐 Time: {timestamp}"
             )
-            telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Uploading MP4 to Telegram...', 80)
+            try:
+                telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Uploading MP4 to Telegram...', 85)
+            except Exception:
+                pass
             send_telegram_file_smart(mp4_path, video_caption, is_video=True)
-            telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Done ✅ MP4 sent to Telegram', 100)
+            try:
+                telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Done ✅ MP4 sent to Telegram', 100)
+            except Exception:
+                pass
         else:
-            fallback_caption = f"📹 <b>RECORDING FALLBACK</b> — {part_label} ({perspective})\n🆔 Room: <code>{room_id}</code>\n📦 Size: {fmt_size(webm_size)}\n⚠️ MP4 conversion failed, sending original WebM as document to avoid Telegram GIF/unplayable preview"
-            telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Fallback upload as document...', 75)
-            send_telegram_file_smart(webm_path, fallback_caption, is_video=False)
-            telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Done ⚠️ fallback document sent', 100)
+            fail_msg = (
+                f"❌ <b>MP4 CONVERSION FAILED</b> — {part_label} ({perspective})\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 Room: <code>{room_id}</code>\n"
+                f"📦 Source Size: {fmt_size(webm_size)}\n"
+                f"⚠️ Backend could not create MP4 from this recording. No fake/black video sent.\n"
+                f"📌 Send Koyeb FFmpeg logs to debug exact cause."
+            )
+            send_telegram_message(fail_msg)
+            try:
+                telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'MP4 conversion failed ❌', 100)
+            except Exception:
+                pass
 
-        # ---- Send MP3 audio to Telegram ----
         if mp3_success:
             mp3_size = os.path.getsize(mp3_path)
             audio_caption = (
@@ -982,10 +1008,11 @@ def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_
             )
             send_telegram_file_smart(mp3_path, audio_caption, is_video=False)
 
-        # Cleanup disk files
         for p in [webm_path, mp4_path, mp3_path]:
-            try: os.remove(p)
-            except: pass
+            try:
+                if p and os.path.exists(p): os.remove(p)
+            except Exception:
+                pass
 
     except Exception as e:
         print(f"❌ Background recording processing error: {e}")
