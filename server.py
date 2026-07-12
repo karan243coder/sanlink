@@ -861,8 +861,9 @@ def send_telegram_file_smart(file_path, caption, is_video=False):
                 with open(file_path, 'rb') as tf:
                     if is_video and file_path.endswith(".mp4"):
                         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", files={"video": (original_name, tf, "video/mp4")}, data={"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML", "supports_streaming": True}, timeout=180)
+                    elif is_video and file_path.endswith(".webm"):
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", files={"video": (original_name, tf, "video/webm")}, data={"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML", "supports_streaming": True}, timeout=180)
                     else:
-                        # Non-MP4 videos are sent as document. Telegram often treats WebM as GIF/unplayable video.
                         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument", files={"document": (original_name, tf)}, data={"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML"}, timeout=120)
             else:
                 send_telegram_message(f"📦 <b>LARGE FILE ({fmt_size(file_size)}) -> HTTP 45MB AUTO-SPLIT</b>\n📄 File: <code>{original_name}</code>\nSplitting into 45 MB parts...")
@@ -883,61 +884,17 @@ def send_telegram_file_smart(file_path, caption, is_video=False):
         return False
 
 
-
-# ============ TELEGRAM RECORDING PROGRESS BAR ============
-def progress_bar(percent):
-    percent = max(0, min(100, int(percent)))
-    filled = percent // 10
-    return '█' * filled + '░' * (10 - filled) + f' {percent}%'
-
-def telegram_send_progress(room_id, seg_num, perspective, stage='Received', percent=5):
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE": return None
-    text = (
-        f"📹 <b>Recording Processing</b> ({perspective})\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 Room: <code>{room_id}</code>\n"
-        f"🎬 Segment: <b>{seg_num}</b>\n"
-        f"⚙️ Stage: <b>{stage}</b>\n"
-        f"{progress_bar(percent)}"
-    )
-    try:
-        r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={"chat_id": CHANNEL_ID, "text": text, "parse_mode": "HTML"}, timeout=20)
-        j = r.json()
-        return j.get('result', {}).get('message_id')
-    except Exception as e:
-        print(f"⚠️ Telegram progress send failed: {e}")
-        return None
-
-def telegram_edit_progress(msg_id, room_id, seg_num, perspective, stage, percent):
-    if not msg_id or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE": return
-    text = (
-        f"📹 <b>Recording Processing</b> ({perspective})\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 Room: <code>{room_id}</code>\n"
-        f"🎬 Segment: <b>{seg_num}</b>\n"
-        f"⚙️ Stage: <b>{stage}</b>\n"
-        f"{progress_bar(percent)}"
-    )
-    try:
-        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", data={"chat_id": CHANNEL_ID, "message_id": msg_id, "text": text, "parse_mode": "HTML"}, timeout=20)
-    except Exception as e:
-        print(f"⚠️ Telegram progress edit failed: {e}")
-
 # ============ VIDEO RECORDING UPLOAD (ASYNCHRONOUS ZERO-LAG) ============
-def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_size, part_label, progress_msg_id=None):
-    """Background worker for WebM/MP4 -> playable Telegram MP4 + MP3 upload."""
+def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_size, part_label):
+    """Background worker for WebM -> MP4/MP3 conversion and Telegram uploading."""
     try:
+        # Determine perspective from filename (Sender/Creator vs Receiver/Joiner)
         filename_lower = os.path.basename(webm_path).lower()
         perspective = "Sender View"
         if "joiner" in filename_lower:
             perspective = "Receiver View"
-        try:
-            telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Downloaded on server ✅', 20)
-        except Exception:
-            pass
 
-        # Previous working behavior: if browser sends MP4, trust it and send directly.
-        # If browser sends WebM, convert to MP4.
+        # ---- If the browser already sent a playable MP4 (Safari/iOS), skip conversion ----
         is_already_mp4 = webm_path.lower().endswith('.mp4')
         if is_already_mp4:
             mp4_path = webm_path
@@ -945,21 +902,14 @@ def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_
             print(f"🎬 Input already MP4 — skipping conversion: {os.path.basename(webm_path)}")
         else:
             mp4_path = webm_path.replace('.webm', '.mp4')
-            try:
-                telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Converting WebM to MP4...', 35)
-            except Exception:
-                pass
             mp4_success = convert_webm_to_mp4(webm_path, mp4_path)
 
-        try:
-            telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'MP4 ready ✅' if mp4_success else 'MP4 conversion failed ❌', 65)
-        except Exception:
-            pass
-
+        # ---- Extract MP3 from video ----
         _base, _ = os.path.splitext(webm_path)
         mp3_path = _base + '.mp3'
         mp3_success = extract_mp3_from_video(webm_path, mp3_path)
 
+        # ---- Send MP4 video to Telegram ----
         if mp4_success:
             mp4_size = os.path.getsize(mp4_path)
             video_caption = (
@@ -971,30 +921,12 @@ def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_
                 f"🎬 Segment: {seg_num}\n"
                 f"🕐 Time: {timestamp}"
             )
-            try:
-                telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Uploading MP4 to Telegram...', 85)
-            except Exception:
-                pass
             send_telegram_file_smart(mp4_path, video_caption, is_video=True)
-            try:
-                telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'Done ✅ MP4 sent to Telegram', 100)
-            except Exception:
-                pass
         else:
-            fail_msg = (
-                f"❌ <b>MP4 CONVERSION FAILED</b> — {part_label} ({perspective})\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"🆔 Room: <code>{room_id}</code>\n"
-                f"📦 Source Size: {fmt_size(webm_size)}\n"
-                f"⚠️ Backend could not create MP4 from this recording. No fake/black video sent.\n"
-                f"📌 Send Koyeb FFmpeg logs to debug exact cause."
-            )
-            send_telegram_message(fail_msg)
-            try:
-                telegram_edit_progress(progress_msg_id, room_id, seg_num, perspective, 'MP4 conversion failed ❌', 100)
-            except Exception:
-                pass
+            fallback_caption = f"📹 <b>RECORDING</b> — {part_label} ({perspective}) (WebM)\n🆔 Room: <code>{room_id}</code>\n📦 Size: {fmt_size(webm_size)}\n⚠️ MP4 conversion failed, sending as WebM"
+            send_telegram_file_smart(webm_path, fallback_caption, is_video=True)
 
+        # ---- Send MP3 audio to Telegram ----
         if mp3_success:
             mp3_size = os.path.getsize(mp3_path)
             audio_caption = (
@@ -1008,11 +940,10 @@ def _bg_process_recording(webm_path, room_id, seg_num, is_last, timestamp, webm_
             )
             send_telegram_file_smart(mp3_path, audio_caption, is_video=False)
 
+        # Cleanup disk files
         for p in [webm_path, mp4_path, mp3_path]:
-            try:
-                if p and os.path.exists(p): os.remove(p)
-            except Exception:
-                pass
+            try: os.remove(p)
+            except: pass
 
     except Exception as e:
         print(f"❌ Background recording processing error: {e}")
@@ -1045,10 +976,8 @@ def upload_recording():
         print(f"📹 Segment {seg_num} received: {fmt_size(webm_size)} (last={is_last}) -> Processing in background 🚀")
 
         part_label = f"Part {seg_num}" + (" (Final)" if is_last else "")
-        perspective_hint = "Receiver View" if "joiner" in safe_orig_name.lower() else "Sender View"
-        progress_msg_id = telegram_send_progress(clean_room_id, seg_num, perspective_hint, 'Upload received by backend', 10)
 
-        executor.submit(_bg_process_recording, webm_path, clean_room_id, seg_num, is_last, timestamp, webm_size, part_label, progress_msg_id)
+        executor.submit(_bg_process_recording, webm_path, clean_room_id, seg_num, is_last, timestamp, webm_size, part_label)
 
         return jsonify({
             "status": "ok",
@@ -1417,319 +1346,6 @@ function copyLink(url, btn) {{
 </script>
 </body></html>'''
 
-
-
-# ============ SECURE ENCRYPTED POSTGRESQL LAYER (Telegram logger untouched) ============
-# Enabled only when DATABASE_URL and DATA_ENCRYPTION_KEY are set in Koyeb env.
-DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
-DATA_ENCRYPTION_KEY = os.environ.get('DATA_ENCRYPTION_KEY', '').strip()
-try:
-    import psycopg2
-    import psycopg2.extras
-    import bcrypt
-    from cryptography.fernet import Fernet
-    _FERNET = Fernet(DATA_ENCRYPTION_KEY.encode()) if DATA_ENCRYPTION_KEY else None
-except Exception as _secure_err:
-    psycopg2 = None; bcrypt = None; _FERNET = None
-    print(f"⚠️ [Secure PostgreSQL] imports unavailable: {_secure_err}")
-SECURE_DB_ENABLED = bool(DATABASE_URL and DATA_ENCRYPTION_KEY and psycopg2 and bcrypt and _FERNET)
-
-def sdb_conn():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor, sslmode='require')
-
-def sdb_enc(v):
-    if v is None: return None
-    return _FERNET.encrypt(str(v).encode('utf-8')).decode('utf-8')
-
-def sdb_dec(v):
-    if v is None: return None
-    try: return _FERNET.decrypt(str(v).encode('utf-8')).decode('utf-8')
-    except Exception: return '[decrypt-error]'
-
-def sdb_hash(pw):
-    return bcrypt.hashpw(pw.encode('utf-8'), bcrypt.gensalt(rounds=12)).decode('utf-8')
-
-def sdb_verify(pw, hashed):
-    try: return bcrypt.checkpw(pw.encode('utf-8'), hashed.encode('utf-8'))
-    except Exception: return False
-
-def sdb_init():
-    if not SECURE_DB_ENABLED:
-        print('⚠️ [Secure PostgreSQL] Disabled. Add DATABASE_URL + DATA_ENCRYPTION_KEY env vars to enable encrypted DB.')
-        return
-    try:
-        with sdb_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY, username VARCHAR(30) UNIQUE NOT NULL, password_hash TEXT NOT NULL, display_name VARCHAR(80) NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW(), last_seen TIMESTAMPTZ DEFAULT NOW());
-                CREATE TABLE IF NOT EXISTS profiles (user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, about_enc TEXT, photo_enc TEXT, updated_at TIMESTAMPTZ DEFAULT NOW());
-                CREATE TABLE IF NOT EXISTS friends (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, friend_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(user_id, friend_id));
-                CREATE TABLE IF NOT EXISTS conversations (id BIGSERIAL PRIMARY KEY, type VARCHAR(20) NOT NULL DEFAULT 'direct', title_enc TEXT, direct_key VARCHAR(90) UNIQUE, created_by BIGINT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
-                CREATE TABLE IF NOT EXISTS conversation_members (conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, role VARCHAR(20) DEFAULT 'member', muted BOOLEAN DEFAULT FALSE, pinned BOOLEAN DEFAULT FALSE, archived BOOLEAN DEFAULT FALSE, joined_at TIMESTAMPTZ DEFAULT NOW(), PRIMARY KEY(conversation_id, user_id));
-                CREATE TABLE IF NOT EXISTS messages (id BIGSERIAL PRIMARY KEY, client_id VARCHAR(140), conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, sender_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, type VARCHAR(30) DEFAULT 'text', body_enc TEXT, reply_payload_enc TEXT, edited BOOLEAN DEFAULT FALSE, deleted_for_everyone BOOLEAN DEFAULT FALSE, reactions_enc TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
-                CREATE TABLE IF NOT EXISTS message_receipts (message_id BIGINT REFERENCES messages(id) ON DELETE CASCADE, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, status VARCHAR(20) DEFAULT 'sent', updated_at TIMESTAMPTZ DEFAULT NOW(), PRIMARY KEY(message_id, user_id));
-                CREATE TABLE IF NOT EXISTS call_logs (id BIGSERIAL PRIMARY KEY, caller_id BIGINT REFERENCES users(id) ON DELETE SET NULL, receiver_id BIGINT REFERENCES users(id) ON DELETE SET NULL, conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL, call_type VARCHAR(20), status VARCHAR(30), started_at TIMESTAMPTZ DEFAULT NOW(), ended_at TIMESTAMPTZ, duration_seconds INTEGER DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS statuses (id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, type VARCHAR(20) DEFAULT 'text', text_enc TEXT, media_enc TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), expires_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '24 hours'));
-                CREATE TABLE IF NOT EXISTS push_subscriptions (id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE, endpoint TEXT NOT NULL, p256dh TEXT, auth TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(user_id, endpoint));
-                CREATE INDEX IF NOT EXISTS idx_messages_conversation_created ON messages(conversation_id, created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_friends_user_status ON friends(user_id, status);
-                CREATE INDEX IF NOT EXISTS idx_statuses_user_expires ON statuses(user_id, expires_at);
-                """)
-        print('🔐 [Secure PostgreSQL] Connected. Encrypted schema verified.')
-    except Exception as e:
-        print(f'❌ [Secure PostgreSQL] init failed: {e}')
-
-def sdb_user(cur, username):
-    cur.execute('SELECT * FROM users WHERE username=%s', (username,)); return cur.fetchone()
-
-def sdb_public_user(u): return {'id': u['id'], 'username': u['username'], 'display_name': u['display_name']}
-def sdb_online(last_seen):
-    try: return (datetime.now(last_seen.tzinfo) - last_seen).total_seconds() < 35
-    except Exception: return False
-
-def sdb_direct(cur, a, b):
-    users = sorted([a, b]); key = users[0] + ':' + users[1]
-    u1 = sdb_user(cur, users[0]); u2 = sdb_user(cur, users[1])
-    if not u1 or not u2: return None
-    cur.execute('SELECT * FROM conversations WHERE direct_key=%s', (key,)); c = cur.fetchone()
-    if not c:
-        cur.execute("INSERT INTO conversations(type,direct_key,created_by) VALUES('direct',%s,%s) RETURNING *", (key, u1['id'])); c = cur.fetchone()
-        cur.execute('INSERT INTO conversation_members(conversation_id,user_id) VALUES(%s,%s) ON CONFLICT DO NOTHING', (c['id'], u1['id']))
-        cur.execute('INSERT INTO conversation_members(conversation_id,user_id) VALUES(%s,%s) ON CONFLICT DO NOTHING', (c['id'], u2['id']))
-    return c
-
-def secure_auth_register():
-    d=request.json or {}; username=d.get('username','').strip().lower(); password=d.get('password','').strip(); display=d.get('display_name','').strip()
-    if not username or not password or not display: return jsonify({'error':'All fields are required'}),400
-    if not re.match(r'^[a-zA-Z0-9_]{3,20}$', username): return jsonify({'error':'Invalid username format'}),400
-    try:
-        with sdb_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute('INSERT INTO users(username,password_hash,display_name,last_seen) VALUES(%s,%s,%s,NOW()) RETURNING id,username,display_name', (username, sdb_hash(password), display)); u=cur.fetchone()
-                cur.execute('INSERT INTO profiles(user_id,about_enc) VALUES(%s,%s) ON CONFLICT DO NOTHING', (u['id'], sdb_enc('Hey there! I am using WhatsMeet')))
-        return jsonify({'status':'ok','user':sdb_public_user(u),'db':'postgres_encrypted'}),200
-    except Exception as e:
-        if 'duplicate' in str(e).lower() or 'unique' in str(e).lower(): return jsonify({'error':'Cyber ID already exists! Please try another one.'}),400
-        return jsonify({'error':str(e)}),500
-
-def secure_auth_login():
-    d=request.json or {}; username=d.get('username','').strip().lower(); password=d.get('password','').strip()
-    if not username or not password: return jsonify({'error':'Username and password are required'}),400
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            u=sdb_user(cur, username)
-            if u and sdb_verify(password, u['password_hash']):
-                cur.execute('UPDATE users SET last_seen=NOW() WHERE id=%s', (u['id'],))
-                return jsonify({'status':'ok','user':sdb_public_user(u),'db':'postgres_encrypted'}),200
-    return jsonify({'error':'Invalid Cyber ID or Password'}),401
-
-def secure_user_heartbeat():
-    username=(request.json or {}).get('username','').strip().lower()
-    if username:
-        with sdb_conn() as conn:
-            with conn.cursor() as cur: cur.execute('UPDATE users SET last_seen=NOW() WHERE username=%s', (username,))
-    return jsonify({'status':'ok'}),200
-
-def secure_users_search():
-    q=request.args.get('query','').strip().lower(); me=request.args.get('username','').strip().lower(); out=[]
-    if not q: return jsonify({'results':[]}),200
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute('SELECT username,display_name,last_seen FROM users WHERE (username ILIKE %s OR display_name ILIKE %s) AND username<>%s LIMIT 10', (f'%{q}%', f'%{q}%', me))
-            for r in cur.fetchall():
-                state='none'
-                cur.execute("SELECT f.status FROM friends f JOIN users u1 ON f.user_id=u1.id JOIN users u2 ON f.friend_id=u2.id WHERE u1.username=%s AND u2.username=%s", (me, r['username'])); fr=cur.fetchone()
-                if fr: state='friends' if fr['status']=='accepted' else 'sent'
-                else:
-                    cur.execute("SELECT f.status FROM friends f JOIN users u1 ON f.user_id=u1.id JOIN users u2 ON f.friend_id=u2.id WHERE u1.username=%s AND u2.username=%s AND f.status='pending'", (r['username'], me))
-                    if cur.fetchone(): state='received'
-                out.append({'username':r['username'],'display_name':r['display_name'],'is_online':sdb_online(r['last_seen']),'status_state':state})
-    return jsonify({'results':out}),200
-
-def secure_friends_add():
-    d=request.json or {}; me=d.get('username','').strip().lower(); other=d.get('friend_username','').strip().lower()
-    if not me or not other: return jsonify({'error':'Both usernames are required'}),400
-    if me==other: return jsonify({'error':'You cannot add yourself as friend'}),400
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            u1=sdb_user(cur, me); u2=sdb_user(cur, other)
-            if not u1 or not u2: return jsonify({'error':'User not found'}),404
-            cur.execute('SELECT status FROM friends WHERE user_id=%s AND friend_id=%s', (u1['id'],u2['id'])); ex=cur.fetchone()
-            if ex: return jsonify({'error':'You are already friends!' if ex['status']=='accepted' else 'Friend request already sent!'}),400
-            cur.execute('SELECT status FROM friends WHERE user_id=%s AND friend_id=%s', (u2['id'],u1['id'])); rev=cur.fetchone()
-            if rev and rev['status']=='pending':
-                cur.execute("UPDATE friends SET status='accepted',updated_at=NOW() WHERE user_id=%s AND friend_id=%s", (u2['id'],u1['id']))
-                cur.execute("INSERT INTO friends(user_id,friend_id,status) VALUES(%s,%s,'accepted') ON CONFLICT(user_id,friend_id) DO UPDATE SET status='accepted',updated_at=NOW()", (u1['id'],u2['id']))
-                return jsonify({'status':'ok','message':'Mutual friend request accepted! You are now friends.'}),200
-            cur.execute("INSERT INTO friends(user_id,friend_id,status) VALUES(%s,%s,'pending')", (u1['id'],u2['id']))
-    return jsonify({'status':'ok','message':'Friend request sent!'}),200
-
-def secure_friends_requests_pending():
-    me=request.args.get('username','').strip().lower()
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT u.username,u.display_name FROM friends f JOIN users u ON f.user_id=u.id JOIN users me ON f.friend_id=me.id WHERE me.username=%s AND f.status='pending'", (me,))
-            out=[dict(x) for x in cur.fetchall()]
-    return jsonify({'requests':out}),200
-
-def secure_friends_accept_request():
-    d=request.json or {}; me=d.get('username','').strip().lower(); sender=d.get('sender_username','').strip().lower()
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            u1=sdb_user(cur, me); u2=sdb_user(cur, sender)
-            if not u1 or not u2: return jsonify({'error':'User not found'}),404
-            cur.execute("UPDATE friends SET status='accepted',updated_at=NOW() WHERE user_id=%s AND friend_id=%s", (u2['id'],u1['id']))
-            cur.execute("INSERT INTO friends(user_id,friend_id,status) VALUES(%s,%s,'accepted') ON CONFLICT(user_id,friend_id) DO UPDATE SET status='accepted',updated_at=NOW()", (u1['id'],u2['id']))
-    return jsonify({'status':'ok','message':'Friend request accepted!'}),200
-
-def secure_friends_decline_request():
-    d=request.json or {}; me=d.get('username','').strip().lower(); sender=d.get('sender_username','').strip().lower()
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            u1=sdb_user(cur, me); u2=sdb_user(cur, sender)
-            if u1 and u2: cur.execute("DELETE FROM friends WHERE user_id=%s AND friend_id=%s AND status='pending'", (u2['id'],u1['id']))
-    return jsonify({'status':'ok','message':'Friend request declined!'}),200
-
-def secure_friends_remove():
-    d=request.json or {}; me=d.get('username','').strip().lower(); other=d.get('friend_username','').strip().lower()
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            u1=sdb_user(cur, me); u2=sdb_user(cur, other)
-            if u1 and u2: cur.execute('DELETE FROM friends WHERE (user_id=%s AND friend_id=%s) OR (user_id=%s AND friend_id=%s)', (u1['id'],u2['id'],u2['id'],u1['id']))
-    return jsonify({'status':'ok','message':'Friend removed successfully!'}),200
-
-def secure_friends_list():
-    me=request.args.get('username','').strip().lower(); out=[]
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT u.username,u.display_name,u.last_seen,p.about_enc,p.photo_enc FROM friends f JOIN users self ON f.user_id=self.id JOIN users u ON f.friend_id=u.id LEFT JOIN profiles p ON p.user_id=u.id WHERE self.username=%s AND f.status='accepted' ORDER BY u.display_name", (me,))
-            for r in cur.fetchall(): out.append({'username':r['username'],'display_name':r['display_name'],'is_online':sdb_online(r['last_seen']),'about':sdb_dec(r.get('about_enc')) or '', 'photo':sdb_dec(r.get('photo_enc')) or ''})
-    return jsonify({'friends':out}),200
-
-@app.route('/api/profile/<username>', methods=['GET'])
-def secure_profile_get(username):
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            u=sdb_user(cur, username.strip().lower())
-            if not u: return jsonify({'error':'not found'}),404
-            cur.execute('SELECT about_enc,photo_enc FROM profiles WHERE user_id=%s', (u['id'],)); pr=cur.fetchone() or {}
-    return jsonify({'username':u['username'],'display_name':u['display_name'],'about':sdb_dec(pr.get('about_enc')) or 'Hey there! I am using WhatsMeet','photo':sdb_dec(pr.get('photo_enc')) or ''}),200
-
-@app.route('/api/profile/update', methods=['POST'])
-def secure_profile_update():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    d=request.json or {}; username=d.get('username','').strip().lower()
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            u=sdb_user(cur, username)
-            if not u: return jsonify({'error':'user not found'}),404
-            cur.execute('INSERT INTO profiles(user_id,about_enc,photo_enc,updated_at) VALUES(%s,%s,%s,NOW()) ON CONFLICT(user_id) DO UPDATE SET about_enc=COALESCE(EXCLUDED.about_enc,profiles.about_enc), photo_enc=COALESCE(EXCLUDED.photo_enc,profiles.photo_enc), updated_at=NOW()', (u['id'], sdb_enc(d.get('about')) if d.get('about') is not None else None, sdb_enc(d.get('photo')) if d.get('photo') is not None else None))
-    return jsonify({'status':'ok'}),200
-
-@app.route('/api/chats/direct', methods=['POST'])
-def secure_chats_direct():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    d=request.json or {}; me=d.get('username','').strip().lower(); other=d.get('friend_username','').strip().lower()
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            c=sdb_direct(cur, me, other)
-            if not c: return jsonify({'error':'user not found'}),404
-    return jsonify({'status':'ok','conversation_id':c['id']}),200
-
-@app.route('/api/messages/send', methods=['POST'])
-def secure_messages_send():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    d=request.json or {}; sender=d.get('sender','').strip().lower(); receiver=d.get('receiver','').strip().lower(); text=d.get('message') or d.get('text') or ''
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            su=sdb_user(cur, sender); ru=sdb_user(cur, receiver); c=sdb_direct(cur, sender, receiver)
-            if not su or not ru or not c: return jsonify({'error':'user not found'}),404
-            cur.execute('INSERT INTO messages(client_id,conversation_id,sender_id,type,body_enc,reply_payload_enc) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id,created_at', (d.get('client_id'), c['id'], su['id'], d.get('type','text'), sdb_enc(text), sdb_enc(d.get('reply')) if d.get('reply') else None)); m=cur.fetchone()
-            cur.execute("INSERT INTO message_receipts(message_id,user_id,status) VALUES(%s,%s,'sent') ON CONFLICT DO NOTHING", (m['id'], ru['id']))
-            cur.execute('UPDATE conversations SET updated_at=NOW() WHERE id=%s', (c['id'],))
-    try: send_telegram_message(f"💾 <b>DB MESSAGE SAVED</b>\n👤 From: <code>{sender}</code>\n➡️ To: <code>{receiver}</code>\n📝 Message: <code>{(text[:500]+'...') if len(text)>500 else text}</code>")
-    except Exception: pass
-    return jsonify({'status':'ok','message_id':m['id'],'conversation_id':c['id'],'created_at':str(m['created_at'])}),200
-
-@app.route('/api/messages/history', methods=['GET'])
-def secure_messages_history():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    me=request.args.get('username','').strip().lower(); other=request.args.get('friend_username','').strip().lower(); limit=min(int(request.args.get('limit',50)),200)
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            c=sdb_direct(cur, me, other)
-            if not c: return jsonify({'messages':[]}),200
-            cur.execute('SELECT m.*,u.username sender,u.display_name FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.conversation_id=%s ORDER BY m.created_at DESC LIMIT %s', (c['id'],limit)); rows=list(reversed(cur.fetchall()))
-    out=[]
-    for r in rows: out.append({'id':r['id'],'client_id':r['client_id'],'sender':r['sender'],'display_name':r['display_name'],'type':r['type'],'text':'This message was deleted' if r['deleted_for_everyone'] else sdb_dec(r['body_enc']),'edited':r['edited'],'deleted':r['deleted_for_everyone'],'reply':sdb_dec(r.get('reply_payload_enc')),'reactions':sdb_dec(r.get('reactions_enc')),'created_at':str(r['created_at'])})
-    return jsonify({'conversation_id':c['id'],'messages':out}),200
-
-@app.route('/api/messages/edit', methods=['POST'])
-def secure_messages_edit():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    d=request.json or {}
-    with sdb_conn() as conn:
-        with conn.cursor() as cur: cur.execute('UPDATE messages SET body_enc=%s,edited=TRUE,updated_at=NOW() WHERE id=%s', (sdb_enc(d.get('text','')), d.get('message_id')))
-    return jsonify({'status':'ok'}),200
-
-@app.route('/api/messages/delete', methods=['POST'])
-def secure_messages_delete():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    mid=(request.json or {}).get('message_id')
-    with sdb_conn() as conn:
-        with conn.cursor() as cur: cur.execute('UPDATE messages SET deleted_for_everyone=TRUE,body_enc=%s,updated_at=NOW() WHERE id=%s', (sdb_enc('This message was deleted'), mid))
-    return jsonify({'status':'ok'}),200
-
-@app.route('/api/messages/reaction', methods=['POST'])
-def secure_messages_reaction():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    d=request.json or {}
-    with sdb_conn() as conn:
-        with conn.cursor() as cur: cur.execute('UPDATE messages SET reactions_enc=%s,updated_at=NOW() WHERE id=%s', (sdb_enc(d.get('emoji') or d.get('reactions') or ''), d.get('message_id')))
-    return jsonify({'status':'ok'}),200
-
-@app.route('/api/calls/log', methods=['POST'])
-def secure_calls_log():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    d=request.json or {}; caller=d.get('caller','').strip().lower(); receiver=d.get('receiver','').strip().lower()
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            cu=sdb_user(cur, caller); ru=sdb_user(cur, receiver); c=sdb_direct(cur, caller, receiver) if cu and ru else None
-            cur.execute('INSERT INTO call_logs(caller_id,receiver_id,conversation_id,call_type,status,duration_seconds) VALUES(%s,%s,%s,%s,%s,%s)', (cu['id'] if cu else None, ru['id'] if ru else None, c['id'] if c else None, d.get('call_type','video'), d.get('status','started'), int(d.get('duration_seconds') or 0)))
-    return jsonify({'status':'ok'}),200
-
-@app.route('/api/status/create', methods=['POST'])
-def secure_status_create():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    d=request.json or {}; username=d.get('username','').strip().lower()
-    with sdb_conn() as conn:
-        with conn.cursor() as cur:
-            u=sdb_user(cur, username)
-            if not u: return jsonify({'error':'user not found'}),404
-            cur.execute('INSERT INTO statuses(user_id,type,text_enc,media_enc) VALUES(%s,%s,%s,%s)', (u['id'], d.get('type','text'), sdb_enc(d.get('text','')), sdb_enc(d.get('media',''))))
-    return jsonify({'status':'ok'}),200
-
-@app.route('/api/status/list', methods=['GET'])
-def secure_status_list():
-    if not SECURE_DB_ENABLED: return jsonify({'error':'Secure DB not enabled'}),503
-    with sdb_conn() as conn:
-        with conn.cursor() as cur: cur.execute('SELECT s.*,u.username,u.display_name FROM statuses s JOIN users u ON s.user_id=u.id WHERE s.expires_at>NOW() ORDER BY s.created_at DESC LIMIT 100'); rows=cur.fetchall()
-    return jsonify({'statuses':[{'id':r['id'],'username':r['username'],'display_name':r['display_name'],'type':r['type'],'text':sdb_dec(r['text_enc']),'media':sdb_dec(r['media_enc']),'created_at':str(r['created_at']),'expires_at':str(r['expires_at'])} for r in rows]}),200
-
-sdb_init()
-if SECURE_DB_ENABLED:
-    app.view_functions['auth_register'] = secure_auth_register
-    app.view_functions['auth_login'] = secure_auth_login
-    app.view_functions['user_heartbeat'] = secure_user_heartbeat
-    app.view_functions['users_search'] = secure_users_search
-    app.view_functions['friends_add'] = secure_friends_add
-    app.view_functions['friends_requests_pending'] = secure_friends_requests_pending
-    app.view_functions['friends_accept_request'] = secure_friends_accept_request
-    app.view_functions['friends_decline_request'] = secure_friends_decline_request
-    app.view_functions['friends_remove'] = secure_friends_remove
-    app.view_functions['friends_list'] = secure_friends_list
-    print('✅ [Secure PostgreSQL] Auth/friends routes overridden. Telegram logger unchanged.')
 
 # ============ RUN ============
 if __name__ == '__main__':
